@@ -104,7 +104,9 @@ def create_message(
     Returns:
         A dictionary containing a base64url encoded email object
     """
-    message = MIMEText(message_text)
+    # Auto-detect HTML content
+    subtype = "html" if message_text.strip().startswith("<") else "plain"
+    message = MIMEText(message_text, subtype)
     message["to"] = to
     message["from"] = sender
     message["subject"] = subject
