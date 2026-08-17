@@ -7,6 +7,7 @@ It exposes Gmail messages as resources and provides tools for composing and send
 
 import re
 from datetime import datetime
+from functools import lru_cache
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -26,10 +27,19 @@ from mcp_gmail.gmail import (
 )
 from mcp_gmail.gmail import send_email as gmail_send_email
 
-# Initialize the Gmail service
-service = get_gmail_service(
-    credentials_path=settings.credentials_path, token_path=settings.token_path, scopes=settings.scopes
-)
+
+@lru_cache(maxsize=1)
+def _service():
+    """Lazy + memoized Gmail API client.
+    First call refreshes token if needed; subsequent calls return the cached client.
+    The underlying google-auth credentials object auto-refreshes on 401, so the
+    cached service remains valid across token expiry without re-building.
+    """
+    return get_gmail_service(
+        credentials_path=settings.credentials_path,
+        token_path=settings.token_path,
+        scopes=settings.scopes,
+    )
 
 mcp = FastMCP(
     "Gmail MCP Server",
@@ -98,7 +108,7 @@ def get_email_message(message_id: str) -> str:
     Returns:
         The formatted email content
     """
-    message = get_message(service, message_id, user_id=settings.user_id)
+    message = get_message(_service(), message_id, user_id=settings.user_id)
     formatted_message = format_message(message)
     return formatted_message
 
@@ -114,7 +124,7 @@ def get_email_thread(thread_id: str) -> str:
     Returns:
         The formatted thread content with all messages
     """
-    thread = get_thread(service, thread_id, user_id=settings.user_id)
+    thread = get_thread(_service(), thread_id, user_id=settings.user_id)
     messages = thread.get("messages", [])
 
     result = f"Email Thread (ID: {thread_id})\n"
@@ -143,9 +153,9 @@ def compose_email(
     Returns:
         The ID of the created draft and its content
     """
-    sender = service.users().getProfile(userId=settings.user_id).execute().get("emailAddress")
+    sender = _service().users().getProfile(userId=settings.user_id).execute().get("emailAddress")
     draft = create_draft(
-        service, sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
+        _service(), sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
     )
 
     draft_id = draft.get("id")
@@ -176,9 +186,9 @@ def send_email(
     Returns:
         Content of the sent email
     """
-    sender = service.users().getProfile(userId=settings.user_id).execute().get("emailAddress")
+    sender = _service().users().getProfile(userId=settings.user_id).execute().get("emailAddress")
     message = gmail_send_email(
-        service, sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
+        _service(), sender=sender, to=to, subject=subject, body=body, user_id=settings.user_id, cc=cc, bcc=bcc
     )
 
     message_id = message.get("id")
@@ -230,7 +240,7 @@ def search_emails(
 
     # Use search_messages to find matching emails
     messages = search_messages(
-        service,
+        _service(),
         user_id=settings.user_id,
         from_email=from_email,
         to_email=to_email,
@@ -247,7 +257,7 @@ def search_emails(
 
     for msg_info in messages:
         msg_id = msg_info.get("id")
-        message = get_message(service, msg_id, user_id=settings.user_id)
+        message = get_message(_service(), msg_id, user_id=settings.user_id)
         headers = get_headers_dict(message)
 
         from_header = headers.get("From", "Unknown")
@@ -274,13 +284,13 @@ def query_emails(query: str, max_results: int = 10) -> str:
     Returns:
         Formatted list of matching emails
     """
-    messages = list_messages(service, user_id=settings.user_id, max_results=max_results, query=query)
+    messages = list_messages(_service(), user_id=settings.user_id, max_results=max_results, query=query)
 
     result = f'Found {len(messages)} messages matching query: "{query}"\n'
 
     for msg_info in messages:
         msg_id = msg_info.get("id")
-        message = get_message(service, msg_id, user_id=settings.user_id)
+        message = get_message(_service(), msg_id, user_id=settings.user_id)
         headers = get_headers_dict(message)
 
         from_header = headers.get("From", "Unknown")
@@ -303,7 +313,7 @@ def list_available_labels() -> str:
     Returns:
         Formatted list of labels with their IDs
     """
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(_service(), user_id=settings.user_id)
 
     result = "Available Gmail Labels:\n"
     for label in labels:
@@ -331,7 +341,7 @@ def mark_message_read(message_id: str) -> str:
     """
     # Remove the UNREAD label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=["UNREAD"], add_labels=[]
+        _service(), user_id=settings.user_id, message_id=message_id, remove_labels=["UNREAD"], add_labels=[]
     )
 
     # Get message details to show what was modified
@@ -359,7 +369,7 @@ def add_label_to_message(message_id: str, label_id: str) -> str:
     """
     # Add the specified label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=[], add_labels=[label_id]
+        _service(), user_id=settings.user_id, message_id=message_id, remove_labels=[], add_labels=[label_id]
     )
 
     # Get message details to show what was modified
@@ -368,7 +378,7 @@ def add_label_to_message(message_id: str, label_id: str) -> str:
 
     # Get the label name for the confirmation message
     label_name = label_id
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(_service(), user_id=settings.user_id)
     for label in labels:
         if label.get("id") == label_id:
             label_name = label.get("name", label_id)
@@ -396,7 +406,7 @@ def remove_label_from_message(message_id: str, label_id: str) -> str:
     """
     # Get the label name before we remove it
     label_name = label_id
-    labels = get_labels(service, user_id=settings.user_id)
+    labels = get_labels(_service(), user_id=settings.user_id)
     for label in labels:
         if label.get("id") == label_id:
             label_name = label.get("name", label_id)
@@ -404,7 +414,7 @@ def remove_label_from_message(message_id: str, label_id: str) -> str:
 
     # Remove the specified label
     result = modify_message_labels(
-        service, user_id=settings.user_id, message_id=message_id, remove_labels=[label_id], add_labels=[]
+        _service(), user_id=settings.user_id, message_id=message_id, remove_labels=[label_id], add_labels=[]
     )
 
     # Get message details to show what was modified
@@ -439,7 +449,7 @@ def get_emails(message_ids: list[str]) -> str:
 
     for msg_id in message_ids:
         try:
-            message = get_message(service, msg_id, user_id=settings.user_id)
+            message = get_message(_service(), msg_id, user_id=settings.user_id)
             retrieved_emails.append((msg_id, message))
         except Exception as e:
             error_emails.append((msg_id, str(e)))
